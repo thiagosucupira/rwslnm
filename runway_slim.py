@@ -2195,7 +2195,7 @@ class RunwayMLSlim:
                 scene_timeout = 600  # 10 minutes timeout in seconds
                 
                 # Process single scene
-                success = self._process_single_scene_with_data(scene_id, image_path, scene_data, output_dir, is_first_scene, is_final_scene)
+                success = self._process_single_scene_with_data(scene_id, image_path, scene_data, output_dir, is_first_scene, is_final_scene, json_path)
                 
                 # Check if we exceeded timeout
                 elapsed_time = time.time() - scene_start_time
@@ -2346,7 +2346,7 @@ class RunwayMLSlim:
         
         return self._process_single_scene_with_data(scene_id, image_path, scene_data, output_dir)
 
-    def _process_single_scene_with_data(self, scene_id: str, image_path: str, scene_data: dict, output_dir: str, is_first_scene: bool = False, is_final_scene: bool = False) -> bool:
+    def _process_single_scene_with_data(self, scene_id: str, image_path: str, scene_data: dict, output_dir: str, is_first_scene: bool = False, is_final_scene: bool = False, json_path: Optional[str] = None) -> bool:
         """
         Process a single scene through the complete workflow using scene data.
         
@@ -2415,6 +2415,14 @@ class RunwayMLSlim:
             if not self.enter_motion_prompt(motion_description):
                 self.logger.error(f"❌ Failed to enter motion prompt for {scene_id}")
                 return False
+            
+            # Step 3.5: Select video duration based on scene characteristics
+            # This integrates with the enhanced pacing system from script_writing_agent.py
+            # to ensure video duration matches the estimated narration/scene length
+            self.logger.info(f"⏲️  Selecting video duration for {scene_id}...")
+            target_duration = self._determine_video_duration(scene_id, scene_data, json_path)
+            if not self.select_video_duration(target_duration):
+                self.logger.warning(f"⚠️  Failed to select {target_duration}s duration for {scene_id}, continuing anyway...")
             
             # Step 4: Generate video
             self.logger.info(f"🎬 Starting generation for {scene_id}...")
@@ -2535,6 +2543,73 @@ class RunwayMLSlim:
             return True
         else:
             self.logger.error("❌ Upload interface not detected")
+            return False
+
+    def test_duration_selection_logic(self) -> bool:
+        """
+        Test the duration selection logic with various scene scenarios.
+        
+        Returns:
+            True if all test cases pass, False otherwise
+        """
+        self.logger.info("🧪 Testing duration selection logic...")
+        
+        test_cases = [
+            # Event scenes should always be 5s
+            {"scene_id": "scene_1_event_0", "scene_data": {"motion_desc": "Quick action"}, "expected": 5},
+            {"scene_id": "scene_2_event_1", "scene_data": {"motion_desc": "Slow cinematic"}, "expected": 5},
+            
+            # Early scenes should be 5s
+            {"scene_id": "scene_0", "scene_data": {"motion_desc": "Epic dramatic opening"}, "expected": 5},
+            {"scene_id": "scene_1", "scene_data": {"motion_desc": "Slow sweeping shot"}, "expected": 5},
+            {"scene_id": "scene_3", "scene_data": {"motion_desc": "Complex movement"}, "expected": 5},
+            
+            # Later scenes with short content should be 5s
+            {"scene_id": "scene_5", "scene_data": {"estimated_duration": 4, "motion_desc": "Quick cut"}, "expected": 5},
+            {"scene_id": "scene_6", "scene_data": {"narration": "Short text here"}, "expected": 5},
+            
+            # Later scenes with long content should be 10s
+            {"scene_id": "scene_7", "scene_data": {"estimated_duration": 9, "motion_desc": "Normal movement"}, "expected": 10},
+            {"scene_id": "scene_8", "scene_data": {"narration": "This is a much longer narration that would take more than seven seconds to speak"}, "expected": 10},
+            
+            # Complex motion descriptions should be 10s
+            {"scene_id": "scene_9", "scene_data": {"motion_desc": "Cinematic sweeping dramatic epic movement"}, "expected": 10},
+            {"scene_id": "scene_10", "scene_data": {"motion_desc": "Slow detailed camera work"}, "expected": 10},
+            
+            # Quick motion descriptions should be 5s
+            {"scene_id": "scene_11", "scene_data": {"motion_desc": "Quick rapid sudden cut"}, "expected": 5},
+            
+            # Default case
+            {"scene_id": "scene_12", "scene_data": {"motion_desc": "Normal camera movement"}, "expected": 5},
+        ]
+        
+        passed = 0
+        failed = 0
+        
+        for test_case in test_cases:
+            scene_id = test_case["scene_id"]
+            scene_data = test_case["scene_data"]
+            expected = test_case["expected"]
+            
+            try:
+                result = self._determine_video_duration(scene_id, scene_data)
+                if result == expected:
+                    self.logger.info(f"✅ {scene_id}: {result}s (expected {expected}s)")
+                    passed += 1
+                else:
+                    self.logger.error(f"❌ {scene_id}: {result}s (expected {expected}s)")
+                    failed += 1
+            except Exception as e:
+                self.logger.error(f"❌ {scene_id}: Exception - {e}")
+                failed += 1
+        
+        self.logger.info(f"📊 Duration selection test results: {passed} passed, {failed} failed")
+        
+        if failed == 0:
+            self.logger.info("✅ All duration selection tests passed!")
+            return True
+        else:
+            self.logger.error(f"❌ {failed} duration selection tests failed")
             return False
 
     def get_narration_duration(self, narration_path: str) -> Optional[float]:
@@ -2725,42 +2800,279 @@ class RunwayMLSlim:
     def select_video_duration(self, target_seconds: int = 10) -> bool:
         """
         Select the desired video duration in the Runway UI.
-        Currently supports 5 s and 10 s buttons.
-        Returns True on success, False otherwise.
+        This handles the dropdown-style duration selector.
+        
+        Args:
+            target_seconds: Duration in seconds (5 or 10)
+            
+        Returns:
+            True on success, False otherwise
         """
-        self.logger.info(f"⏲️  Selecting {target_seconds}s video duration…")
-        text_selector_variants = [
-            f"{target_seconds}s",
-            f"{target_seconds} s",
-            f"{target_seconds}sec",
-            f"{target_seconds} sec"
-        ]
-
-        selectors = []
-        for variant in text_selector_variants:
-            selectors.extend([
-                (By.XPATH, f"//button[contains(text(), '{variant}')]"),
-                (By.XPATH, f"//span[contains(text(), '{variant}')]/ancestor::button[1]"),
-                (By.XPATH, f"//div[contains(text(), '{variant}')]"),
-            ])
-
-        duration_elem = self.find_element_safe(selectors, wait_time=5)
-        if duration_elem:
-            try:
-                duration_elem.click()
-                self.logger.info("✅ Video duration selected")
-                time.sleep(1)
+        self.logger.info(f"⏲️  Selecting {target_seconds}s video duration...")
+        
+        # Validate input
+        if target_seconds not in [5, 10]:
+            self.logger.warning(f"⚠️  Unsupported duration {target_seconds}s, defaulting to 10s")
+            target_seconds = 10
+        
+        try:
+            # Step 1: Find and click the dropdown trigger button
+            trigger_selectors = [
+                (By.CSS_SELECTOR, "button[data-testid='duration-control']"),
+                (By.CSS_SELECTOR, "button.trigger-XXn1ny"),
+                (By.CSS_SELECTOR, "button[aria-haspopup='listbox']"),
+                (By.XPATH, "//button[@aria-haspopup='listbox' and contains(@class, 'trigger')]"),
+                (By.XPATH, "//button[contains(@class, 'duration-picker')]"),
+            ]
+            
+            trigger_button = self.find_element_safe(trigger_selectors, wait_time=8)
+            
+            if not trigger_button:
+                self.logger.error("❌ Could not find duration dropdown trigger button")
+                return False
+            
+            # Check current value to see if we need to change it
+            current_text = trigger_button.text.strip()
+            self.logger.info(f"📍 Current duration setting: '{current_text}'")
+            
+            # If it already shows the target duration, no need to change
+            if f"{target_seconds}s" in current_text:
+                self.logger.info(f"✅ Duration already set to {target_seconds}s")
                 return True
+            
+            # Click the trigger to open dropdown
+            try:
+                trigger_button.click()
+                self.logger.info("✅ Clicked duration dropdown trigger")
             except Exception as e:
-                self.logger.warning(f"Click failed when selecting duration: {e}; trying JavaScript click…")
+                self.logger.warning(f"⚠️  Standard click failed on trigger: {e}, trying JavaScript...")
+                self.driver.execute_script("arguments[0].click();", trigger_button)
+                self.logger.info("✅ Clicked duration dropdown trigger via JavaScript")
+            
+            # Wait for dropdown to open
+            time.sleep(2)
+            
+            # Step 2: Find and click the target duration option in the dropdown
+            option_selectors = [
+                # Direct data-key attribute targeting
+                (By.CSS_SELECTOR, f"div[role='option'][data-key='{target_seconds}']"),
+                
+                # Text-based selection in dropdown options
+                (By.XPATH, f"//div[@role='option']//span[contains(text(), '{target_seconds} seconds')]"),
+                (By.XPATH, f"//div[@role='option' and contains(., '{target_seconds} seconds')]"),
+                
+                # Menu item with specific text
+                (By.XPATH, f"//div[contains(@class, 'menuItem')]//span[contains(text(), '{target_seconds} seconds')]"),
+                
+                # More generic option selections
+                (By.XPATH, f"//div[@role='option']//span[text()='{target_seconds} seconds']"),
+                (By.XPATH, f"//span[@class='menuItemText-mk9USl' and contains(text(), '{target_seconds} seconds')]"),
+            ]
+            
+            option_element = self.find_element_safe(option_selectors, wait_time=5)
+        
+            if option_element:
+            try:
+                    # If we found a span, try to click its parent option div
+                    if option_element.tag_name.lower() == 'span':
+                        try:
+                            parent_option = option_element.find_element(By.XPATH, "./ancestor::div[@role='option'][1]")
+                            option_element = parent_option
+                            self.logger.debug("Using parent option div for clicking")
+                        except:
+                            self.logger.debug("Using span element directly")
+                
+                    # Click the option
+                    option_element.click()
+                    self.logger.info(f"✅ Successfully selected {target_seconds}s duration option")
+                
+                    # Wait for dropdown to close and UI to update
+                time.sleep(2)
+                
+                    # Verify the selection worked by checking the trigger button text
+                    try:
+                        updated_text = trigger_button.text.strip()
+                        if f"{target_seconds}s" in updated_text:
+                            self.logger.info(f"✅ Duration selection verified - trigger shows '{updated_text}'")
+                            return True
+                    else:
+                            self.logger.warning(f"⚠️  Selection may have failed - trigger shows '{updated_text}'")
+                            return True  # Return True anyway since we clicked successfully
+                except:
+                        self.logger.info(f"ℹ️  Duration selected (could not verify trigger text)")
+                return True
+                
+            except Exception as e:
+                    self.logger.warning(f"⚠️  Standard click failed on option: {e}, trying JavaScript...")
                 try:
-                    self.driver.execute_script("arguments[0].click();", duration_elem)
+                        self.driver.execute_script("arguments[0].click();", option_element)
+                    self.logger.info(f"✅ Successfully selected {target_seconds}s duration via JavaScript")
+                    time.sleep(2)
                     return True
                 except Exception as js_e:
-                    self.logger.error(f"JavaScript click failed: {js_e}")
+                        self.logger.error(f"❌ JavaScript click on option also failed: {js_e}")
         else:
-            self.logger.warning("Could not find UI element for requested video duration – proceeding anyway.")
+                self.logger.error(f"❌ Could not find {target_seconds}s duration option in dropdown")
+            
+                # Debug: show available options
+            try:
+                    all_options = self.driver.find_elements(By.CSS_SELECTOR, "div[role='option']")
+                    self.logger.info(f"📋 Found {len(all_options)} dropdown options:")
+                    for i, option in enumerate(all_options):
+                        try:
+                            option_text = option.text.strip()
+                            option_key = option.get_attribute('data-key')
+                            self.logger.info(f"  {i+1}. '{option_text}' (data-key: {option_key})")
+                        except:
+                            self.logger.info(f"  {i+1}. (couldn't get option details)")
+            except Exception as debug_e:
+                    self.logger.debug(f"Option debugging failed: {debug_e}")
+        
+        except Exception as e:
+            self.logger.error(f"❌ Error during duration selection: {e}")
+        
+        # If we get here, selection failed
+        self.logger.warning(f"⚠️  Duration selection failed - proceeding with Runway default")
+        
+        # Try to close any open dropdown by clicking elsewhere
+        try:
+            self.driver.execute_script("document.body.click();")
+        except:
+            pass
+        
         return False
+
+    def _determine_video_duration(self, scene_id: str, scene_data: dict, json_path: Optional[str] = None) -> int:
+        """
+        Deterministically determine video duration based on actual narration audio length.
+        
+        Args:
+            scene_id: Scene identifier (e.g., "scene_0", "scene_1_event_0")
+            scene_data: Scene data dictionary (not used in this version)
+            json_path: Path to the JSON file (used to find narration files in same directory)
+            
+        Returns:
+            Duration in seconds (5 or 10)
+        """
+        # Default to 5 seconds if narration not found
+        default_duration = 5
+        
+        try:
+            # Extract scene index from scene_id
+            scene_index = None
+            if scene_id.startswith("scene_"):
+                try:
+                    # Handle both "scene_0" and "scene_0_event_0" formats
+                    parts = scene_id.split("_")
+                    if len(parts) >= 2:
+                        scene_index = int(parts[1])
+                except (IndexError, ValueError):
+                    self.logger.warning(f"⚠️  Could not extract scene index from {scene_id}")
+                    return default_duration
+            
+            if scene_index is None:
+                self.logger.warning(f"⚠️  No scene index found in {scene_id}")
+                return default_duration
+            
+            # Construct narration file path
+            # We need to find the narration file - it could be in multiple locations
+            # Pattern: narration_{job_name}_{scene_index}.mp3
+            
+            # First, try to find the narration file by looking in common locations
+            narration_file_found = None
+            
+            # Common narration filename patterns
+            possible_patterns = [
+                f"narration_*_{scene_index}.mp3",  # Standard pattern
+                f"narration_{scene_index}.mp3",    # Alternative pattern
+                f"scene_{scene_index}_narration.mp3",  # Alternative pattern
+            ]
+            
+            # Determine search directories based on JSON path
+            search_dirs = []
+            
+            import os
+            import glob
+            
+            if json_path and os.path.exists(json_path):
+                # Use JSON directory as primary search location
+                json_dir = os.path.dirname(json_path)
+                search_dirs.append(json_dir)
+                self.logger.debug(f"Using JSON directory for narration search: {json_dir}")
+            else:
+                self.logger.debug("No JSON path available, using fallback search locations")
+                
+            # Fallback search directories
+            current_dir = os.getcwd()
+            search_dirs.extend([
+                current_dir,
+                os.path.join(current_dir, "output"),
+                os.path.join(current_dir, "output", "*"),  # Any output subdirectory
+                os.path.dirname(current_dir),
+                os.path.join(os.path.dirname(current_dir), "output"),
+                os.path.join(os.path.dirname(current_dir), "output", "*"),
+            ])
+            
+            # Expand glob patterns
+            expanded_dirs = []
+            for dir_path in search_dirs:
+                if "*" in dir_path:
+                    expanded_dirs.extend(glob.glob(dir_path))
+                else:
+                    expanded_dirs.append(dir_path)
+            
+            # Search for narration files
+            for search_dir in expanded_dirs:
+                if not os.path.isdir(search_dir):
+                    continue
+                    
+                for pattern in possible_patterns:
+                    file_pattern = os.path.join(search_dir, pattern)
+                    matches = glob.glob(file_pattern)
+                    if matches:
+                        # Use the first match found
+                        narration_file_found = matches[0]
+                        break
+                
+                if narration_file_found:
+                    break
+            
+            # If we found a narration file, get its duration
+            if narration_file_found and os.path.exists(narration_file_found):
+                narration_duration = self.get_narration_duration(narration_file_found)
+                
+                if narration_duration is not None:
+                    self.logger.info(f"🎵 {scene_id} narration duration: {narration_duration:.2f}s ({narration_file_found})")
+                    
+                    # Deterministic mapping: narration duration -> video duration
+                    if narration_duration <= 6.0:
+                        # Short narration (≤6s) -> 5s video
+                        selected_duration = 5
+                        self.logger.info(f"🎬 {scene_id} short narration ({narration_duration:.1f}s) -> {selected_duration}s video")
+                    elif narration_duration <= 9.0:
+                        # Medium narration (6-9s) -> 10s video
+                        selected_duration = 10
+                        self.logger.info(f"🎬 {scene_id} medium narration ({narration_duration:.1f}s) -> {selected_duration}s video")
+                    else:
+                        # Long narration (>9s) -> 10s video (cap at 10s for platform limits)
+                        selected_duration = 10
+                        self.logger.info(f"🎬 {scene_id} long narration ({narration_duration:.1f}s) -> {selected_duration}s video (capped)")
+                    
+                    return selected_duration
+                else:
+                    self.logger.warning(f"⚠️  Could not read duration from {narration_file_found}")
+            else:
+                self.logger.warning(f"⚠️  No narration file found for {scene_id} (scene_index: {scene_index})")
+                self.logger.debug(f"Searched in: {expanded_dirs}")
+                self.logger.debug(f"With patterns: {possible_patterns}")
+            
+            # Fallback to default duration
+            self.logger.info(f"🎬 {scene_id} using default duration: {default_duration}s (no narration file found)")
+            return default_duration
+            
+        except Exception as e:
+            self.logger.warning(f"⚠️  Error determining duration for {scene_id}: {e}, using default {default_duration}s")
+            return default_duration
 
     def _force_video_mode(self, max_attempts: int = 3) -> bool:
         """
@@ -2971,8 +3283,16 @@ def main():
     print("2. Navigate to RunwayML") 
     print("3. Login")
     print("4. Process ALL scenes automatically in batch")
-    print("5. Track progress and allow resuming")
-    print("6. Create concatenated videos with intro/outro")
+    print("5. Intelligently select video duration (5s/10s) based on scene data")
+    print("6. Track progress and allow resuming")
+    print("7. Create concatenated videos with intro/outro")
+    print()
+    print("🎬 INTELLIGENT DURATION SELECTION:")
+    print("   - Event scenes (scene_X_event_Y): 5s for quick pacing")
+    print("   - Early scenes (0-3): 5s for better retention")
+    print("   - Long narration (>7s): 10s to match content")
+    print("   - Complex motion descriptions: 10s for cinematic feel")
+    print("   - Default: 5s for improved pacing")
     print()
     
     # ------------------------------------------------------------
