@@ -2872,7 +2872,7 @@ class RunwayMLSlim:
             option_element = self.find_element_safe(option_selectors, wait_time=5)
         
             if option_element:
-            try:
+                try:
                     # If we found a span, try to click its parent option div
                     if option_element.tag_name.lower() == 'span':
                         try:
@@ -2887,7 +2887,7 @@ class RunwayMLSlim:
                     self.logger.info(f"✅ Successfully selected {target_seconds}s duration option")
                 
                     # Wait for dropdown to close and UI to update
-                time.sleep(2)
+                    time.sleep(2)
                 
                     # Verify the selection worked by checking the trigger button text
                     try:
@@ -2895,27 +2895,27 @@ class RunwayMLSlim:
                         if f"{target_seconds}s" in updated_text:
                             self.logger.info(f"✅ Duration selection verified - trigger shows '{updated_text}'")
                             return True
-                    else:
+                        else:
                             self.logger.warning(f"⚠️  Selection may have failed - trigger shows '{updated_text}'")
                             return True  # Return True anyway since we clicked successfully
-                except:
+                    except:
                         self.logger.info(f"ℹ️  Duration selected (could not verify trigger text)")
-                return True
-                
-            except Exception as e:
-                    self.logger.warning(f"⚠️  Standard click failed on option: {e}, trying JavaScript...")
-                try:
-                        self.driver.execute_script("arguments[0].click();", option_element)
-                    self.logger.info(f"✅ Successfully selected {target_seconds}s duration via JavaScript")
-                    time.sleep(2)
                     return True
-                except Exception as js_e:
+                
+                except Exception as e:
+                    self.logger.warning(f"⚠️  Standard click failed on option: {e}, trying JavaScript...")
+                    try:
+                        self.driver.execute_script("arguments[0].click();", option_element)
+                        self.logger.info(f"✅ Successfully selected {target_seconds}s duration via JavaScript")
+                        time.sleep(2)
+                        return True
+                    except Exception as js_e:
                         self.logger.error(f"❌ JavaScript click on option also failed: {js_e}")
-        else:
+            else:
                 self.logger.error(f"❌ Could not find {target_seconds}s duration option in dropdown")
             
                 # Debug: show available options
-            try:
+                try:
                     all_options = self.driver.find_elements(By.CSS_SELECTOR, "div[role='option']")
                     self.logger.info(f"📋 Found {len(all_options)} dropdown options:")
                     for i, option in enumerate(all_options):
@@ -2925,7 +2925,7 @@ class RunwayMLSlim:
                             self.logger.info(f"  {i+1}. '{option_text}' (data-key: {option_key})")
                         except:
                             self.logger.info(f"  {i+1}. (couldn't get option details)")
-            except Exception as debug_e:
+                except Exception as debug_e:
                     self.logger.debug(f"Option debugging failed: {debug_e}")
         
         except Exception as e:
